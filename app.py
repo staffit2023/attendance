@@ -112,6 +112,15 @@ def normalize_jadwal_value(val: str) -> str:
 @st.cache_data(show_spinner=False)
 def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Dipanggil oleh load_data(); di-cache agar parsing tidak berulang."""
+        # --- JANGAN BACA SCAN PADA SAKIT DENGAN SKD ---
+    # Untuk baris dengan kategori "SAKIT_SKD": kosongkan scan & nolkan telat
+    if 'jadwal_kategori' in df.columns:
+        mask_skd = df['jadwal_kategori'].astype(str).str.upper().eq('SAKIT_SKD')
+        if mask_skd.any():
+            df.loc[mask_skd, ['scan_masuk', 'scan_pulang']] = np.nan
+            if 'terlambat_menit' in df.columns:
+                df.loc[mask_skd, 'terlambat_menit'] = 0
+
     import io as _io
     bio = _io.BytesIO(file_bytes)
     # baca dengan converters agar pandas tidak auto-parse tanggal
