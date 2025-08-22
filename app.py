@@ -112,16 +112,7 @@ def normalize_jadwal_value(val: str) -> str:
 @st.cache_data(show_spinner=False)
 def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Dipanggil oleh load_data(); di-cache agar parsing tidak berulang."""
-
     import io as _io
-        # departemen alias
-    if 'departemen' not in df.columns:
-        for alt in ['department','departement','dept','divisi','bagian','unit']:
-            if alt in df.columns:
-                df['departemen'] = df[alt]; break
-    if 'departemen' not in df.columns:
-        df['departemen'] = ""
-        
     bio = _io.BytesIO(file_bytes)
     # baca dengan converters agar pandas tidak auto-parse tanggal
     if filename.lower().endswith('.csv'):
