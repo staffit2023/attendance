@@ -617,15 +617,17 @@ def main():
     st.success(f"Scanlog dimuat: {len(scanlog_df):,} baris")
 
     # ========== Filter Data ==========
+    # ========== Filter Data (CASCADING) ==========
     with st.expander("🎛️ Filter Data", expanded=True):
+        # Tentukan rentang min/max dari data yang SUDAH parse_tanggal
         if 'tanggal' in scanlog_df.columns and scanlog_df['tanggal'].notna().any():
             tmin_dt = pd.to_datetime(scanlog_df['tanggal']).min().date()
             tmax_dt = pd.to_datetime(scanlog_df['tanggal']).max().date()
         else:
             tmin_dt = date.today(); tmax_dt = date.today()
-
+    
         mode = st.radio("Metode input tanggal", ["Kalender", "Manual (dd-mm-yy)"], horizontal=True)
-
+    
         def _parse_ddmmyy(s: str) -> date:
             s = (s or "").strip()
             for fmt in ["%d-%m-%y", "%d-%m-%Y", "%d/%m/%y", "%d/%m/%Y", "%d.%m.%y", "%d.%m.%Y"]:
@@ -634,7 +636,7 @@ def main():
                 except Exception:
                     pass
             return pd.to_datetime(s, dayfirst=True, errors="raise").date()
-
+    
         if mode == "Kalender":
             start_date, end_date = st.date_input(
                 "Rentang Tanggal (DD-MM-YYYY)",
@@ -653,27 +655,58 @@ def main():
             except Exception as e:
                 st.error(f"Input tanggal manual salah: {e}")
                 st.stop()
-
+    
         st.write(f"Periode filter (dd-mm-yy): **{start_date.strftime('%d-%m-%y')} → {end_date.strftime('%d-%m-%y')}**")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            dept_opsi = sorted(scanlog_df.get('departemen', pd.Series([], dtype=str)).dropna().unique().tolist())
-            f_dept = st.multiselect("Departemen", dept_opsi)
-        with c2:
-            jab_opsi = sorted(scanlog_df.get('jabatan', pd.Series([], dtype=str)).dropna().unique().tolist())
-            f_jabatan = st.multiselect("Jabatan", jab_opsi, default=jab_opsi)
-        with c3:
-            nama_opsi = sorted(scanlog_df.get('nama', pd.Series([], dtype=str)).dropna().unique().tolist())
-            f_nama = st.multiselect("Nama", nama_opsi)
-        with c4:
-            kat_opsi = ["", "LIBUR","IZIN_DINAS","TIDAK_HADIR","IZIN_PRIBADI","SAKIT_TANPA_SKD","SAKIT_SKD"]
-            f_kategori = st.multiselect("Kategori Jadwal", kat_opsi)
-
-    _df = scanlog_df
-    if 'tanggal' in _df.columns:
-        mask_date = _df['tanggal'].dt.date.between(start_date, end_date)
-        _df = _df[mask_date]
+    
+        # Helper untuk menjaga nilai pilihan tetap valid ketika opsi menyempit
+        def _keep_valid(selected_list, options_list):
+            if not isinstance(selected_list, (list, tuple, set)):
+                return []
+            opts = set(options_list or [])
+            return [x for x in selected_list if x in opts]
+    
+        # 1) Filter awal hanya BERDASARKAN TANGGAL
+        _df_date = scanlog_df.copy()
+        if 'tanggal' in _df_date.columns:
+            mask_date = _df_date['tanggal'].dt.date.between(start_date, end_date)
+            _df_date = _df_date[mask_date]
+    
+        # Pastikan kolom aman ada
+        for col in ['departemen','jabatan','nama','jadwal_kategori']:
+            if col not in _df_date.columns:
+                _df_date[col] = ""
+    
+        # 2) Opsi Departemen dari data yang masuk tanggal
+        dept_opsi = sorted([x for x in _df_date['departemen'].dropna().unique().tolist() if str(x).strip() != ""])
+        # Simpan/ambil state lama bila ada
+        prev_dept = st.session_state.get("f_dept", [])
+        # Tampilkan multiselect departemen
+        f_dept = st.multiselect("Departemen", dept_opsi, default=_keep_valid(prev_dept, dept_opsi))
+        st.session_state.f_dept = f_dept
+    
+        # 3) Setelah pilih Departemen → sempitkan data untuk opsi Jabatan
+        df_after_dept = _df_date if not f_dept else _df_date[_df_date['departemen'].isin(f_dept)]
+        jab_opsi = sorted([x for x in df_after_dept['jabatan'].dropna().unique().tolist() if str(x).strip() != ""])
+        prev_jab = st.session_state.get("f_jabatan", jab_opsi)  # default seperti semula: semua jabatan terpilih
+        f_jabatan = st.multiselect("Jabatan", jab_opsi, default=_keep_valid(prev_jab, jab_opsi) or jab_opsi)
+        st.session_state.f_jabatan = f_jabatan
+    
+        # 4) Setelah pilih Jabatan → sempitkan data untuk opsi Nama
+        df_after_jab = df_after_dept if not f_jabatan else df_after_dept[df_after_dept['jabatan'].isin(f_jabatan)]
+        nama_opsi = sorted([x for x in df_after_jab['nama'].dropna().unique().tolist() if str(x).strip() != ""])
+        prev_nama = st.session_state.get("f_nama", [])
+        f_nama = st.multiselect("Nama", nama_opsi, default=_keep_valid(prev_nama, nama_opsi))
+        st.session_state.f_nama = f_nama
+    
+        # 5) Setelah pilih Nama → sempitkan data untuk opsi Kategori
+        df_after_nama = df_after_jab if not f_nama else df_after_jab[df_after_jab['nama'].isin(f_nama)]
+        kat_opsi = sorted([x for x in df_after_nama['jadwal_kategori'].dropna().unique().tolist() if str(x).strip() != ""])
+        prev_kat = st.session_state.get("f_kategori", [])
+        f_kategori = st.multiselect("Kategori Jadwal", kat_opsi, default=_keep_valid(prev_kat, kat_opsi))
+        st.session_state.f_kategori = f_kategori
+    
+    # Terapkan SEMUA filter cascading ke _df final
+    _df = _df_date.copy()
     if f_dept:
         _df = _df[_df['departemen'].isin(f_dept)]
     if f_jabatan:
@@ -682,6 +715,7 @@ def main():
         _df = _df[_df['nama'].isin(f_nama)]
     if f_kategori:
         _df = _df[_df['jadwal_kategori'].isin(f_kategori)]
+
 
     # ---------- Preview ----------
     with st.expander("🔍 Preview Data Scanlog (setelah filter)"):
@@ -1195,4 +1229,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
