@@ -825,43 +825,77 @@ def main():
 
     with tab_gph:
         st.markdown("### Editor Gaji Per Hari per Karyawan")
-        st.caption("View ini mengikuti filter di atas (periode + dept/jabatan/nama/kategori). Penyimpanan hanya untuk baris yang tampil/diubah pada filter saat ini.")
+        st.caption("View ini mengikuti filter utama (periode + dept/jabatan/nama/kategori). Penyimpanan hanya untuk baris yang tampil/diubah pada filter saat ini.")
 
-        # --- Bangun master karyawan TERFILTER (sudah pakai _df yang terfilter di atas)
-        #     Pastikan kolom nip string agar merge/update konsisten.
-        master_view = _df[['nip','nama','jabatan','departemen']].drop_duplicates().copy()
+        # --- Bangun master karyawan TERFILTER dari _df (sudah terfilter di atas)
+        _tmp = _df.copy()
+        for col in ['nip','nama','jabatan','departemen']:
+            if col not in _tmp.columns:
+                _tmp[col] = ""  # safety jika kolom tidak ada
+
+        master_view = _tmp[['nip','nama','jabatan','departemen']].drop_duplicates().copy()
         master_view['nip'] = master_view['nip'].astype(str)
 
-        # --- Sinkronkan daftar karyawan baru ke session_state.gph_df (tetap global)
+        # --- Sinkronkan daftar karyawan ke session_state.gph_df (global)
         if 'gph_df' not in st.session_state or st.session_state.gph_df is None or st.session_state.gph_df.empty:
             base = master_view.copy()
             base['gaji_per_hari'] = int(default_gph)
             st.session_state.gph_df = base
         else:
-            # pastikan tipe dan tambahkan yang belum ada
+            # Pastikan kolom wajib ada di gph_df lama
+            for col in ['nip','nama','jabatan','departemen','gaji_per_hari']:
+                if col not in st.session_state.gph_df.columns:
+                    # isi default supaya aman
+                    if col == 'gaji_per_hari':
+                        st.session_state.gph_df[col] = int(default_gph)
+                    else:
+                        st.session_state.gph_df[col] = ""
             st.session_state.gph_df['nip'] = st.session_state.gph_df['nip'].astype(str)
+
+            # Tambahkan karyawan baru yang belum ada di gph_df
             exist_nips = set(st.session_state.gph_df['nip'])
             add_rows = master_view[~master_view['nip'].isin(exist_nips)].copy()
             if not add_rows.empty:
                 add_rows['gaji_per_hari'] = int(default_gph)
                 st.session_state.gph_df = pd.concat([st.session_state.gph_df, add_rows], ignore_index=True)
 
-        # --- Buat VIEW yang mengikuti filter saat ini (hanya nip yang ada di master_view)
+        # --- Buat VIEW mengikuti filter saat ini (hanya NIP yang ada di master_view)
         full_gph = st.session_state.gph_df.copy()
         full_gph['nip'] = full_gph['nip'].astype(str)
-        view = full_gph.merge(master_view[['nip','nama','jabatan','departemen']], on='nip', how='inner')
 
-        # --- (Opsional) Sub-filter tambahan di tab ini
+        # Pastikan kolom ada sebelum merge
+        for col in ['nama','jabatan','departemen','gaji_per_hari']:
+            if col not in full_gph.columns:
+                full_gph[col] = "" if col != 'gaji_per_hari' else int(default_gph)
+
+        view = full_gph.merge(
+            master_view[['nip','nama','jabatan','departemen']],
+            on='nip', how='inner', suffixes=('', '_m')
+        )
+
+        # Kalau terjadi duplikasi kolom setelah merge, rapikan (prioritaskan value dari master_view)
+        for col in ['nama','jabatan','departemen']:
+            if f"{col}_m" in view.columns:
+                # jika kolom utama kosong, isi dari _m
+                view[col] = np.where(view[col].astype(str).str.strip().eq(""), view[f"{col}_m"], view[col])
+                view.drop(columns=[f"{col}_m"], inplace=True, errors='ignore')
+
+        # Safety: pastikan tiga kolom ini ada agar tidak KeyError
+        for col in ['departemen','jabatan','nama']:
+            if col not in view.columns:
+                view[col] = ""
+
+        # --- Sub-filter opsional di tab ini (aman bila kolom kosong)
         c1, c2, c3 = st.columns(3)
         with c1:
-            dept_ops = sorted(view['departemen'].dropna().unique().tolist())
-            sf_dept = st.multiselect("Filter Dept (di tab ini)", dept_ops)
+            _deps = sorted([x for x in view['departemen'].dropna().unique().tolist() if str(x).strip() != ""]) if 'departemen' in view.columns else []
+            sf_dept = st.multiselect("Filter Dept (di tab ini)", _deps)
         with c2:
-            jab_ops = sorted(view['jabatan'].dropna().unique().tolist())
-            sf_jab = st.multiselect("Filter Jabatan (di tab ini)", jab_ops)
+            _jabs = sorted([x for x in view['jabatan'].dropna().unique().tolist() if str(x).strip() != ""]) if 'jabatan' in view.columns else []
+            sf_jab = st.multiselect("Filter Jabatan (di tab ini)", _jabs)
         with c3:
-            nama_ops = sorted(view['nama'].dropna().unique().tolist())
-            sf_nama = st.multiselect("Filter Nama (di tab ini)", nama_ops)
+            _nms = sorted([x for x in view['nama'].dropna().unique().tolist() if str(x).strip() != ""]) if 'nama' in view.columns else []
+            sf_nama = st.multiselect("Filter Nama (di tab ini)", _nms)
 
         if sf_dept:
             view = view[view['departemen'].isin(sf_dept)]
@@ -870,8 +904,9 @@ def main():
         if sf_nama:
             view = view[view['nama'].isin(sf_nama)]
 
-        # --- Urutkan rapi
-        view = view[['nip','nama','jabatan','departemen','gaji_per_hari']].sort_values(['departemen','jabatan','nama','nip'])
+        # --- Urutkan rapi (hanya gunakan kolom yang ada)
+        sort_cols = [c for c in ['departemen','jabatan','nama','nip'] if c in view.columns]
+        view = view[[c for c in ['nip','nama','jabatan','departemen','gaji_per_hari'] if c in view.columns]].sort_values(sort_cols)
 
         st.write(f"Baris tampil: **{len(view):,}** (mengikuti filter)")
         gph_edit_view = st.data_editor(
@@ -885,18 +920,23 @@ def main():
             key="gph_editor_view"
         )
 
-        # --- Util update partial: hanya apply perubahan pada nip yang tampil
+        # --- Update partial: hanya apply perubahan pada NIP yang tampil
         def _apply_update_to_state(edited_df: pd.DataFrame):
             if edited_df is None or edited_df.empty:
                 return
             edited_df = edited_df.copy()
+            if 'nip' not in edited_df.columns:
+                return
             edited_df['nip'] = edited_df['nip'].astype(str)
 
-            # siapkan map gph hasil edit untuk nip yang tampil
+            # peta nilai gph baru untuk nip yang tampil
+            if 'gaji_per_hari' not in edited_df.columns:
+                return
             upd_map = edited_df.set_index('nip')['gaji_per_hari'].to_dict()
 
-            # update ke st.session_state.gph_df hanya untuk nip yang ada di view
             base = st.session_state.gph_df.copy()
+            if 'nip' not in base.columns:
+                return
             base['nip'] = base['nip'].astype(str)
             mask = base['nip'].isin(upd_map.keys())
             if mask.any():
@@ -914,18 +954,24 @@ def main():
                 st.session_state.must_compute = True
 
         st.divider()
-        # Download GPH (opsional), tetap global agar lengkap
+        # Download GPH (global + view filter) — aman walau kolom tidak lengkap
         buf_gph = io.BytesIO()
         with pd.ExcelWriter(buf_gph, engine='openpyxl') as writer:
-            st.session_state.gph_df[['nip','nama','jabatan','departemen','gaji_per_hari']].sort_values(
-                ['departemen','jabatan','nama','nip']
-            ).to_excel(writer, sheet_name='Gaji_Per_Hari_Global', index=False)
-            gph_edit_view.to_excel(writer, sheet_name='Gaji_Per_Hari_View_Filter', index=False)
+            cols_global = [c for c in ['nip','nama','jabatan','departemen','gaji_per_hari'] if c in st.session_state.gph_df.columns]
+            st.session_state.gph_df[cols_global].sort_values([c for c in ['departemen','jabatan','nama','nip'] if c in cols_global]).to_excel(
+                writer, sheet_name='Gaji_Per_Hari_Global', index=False
+            )
+            cols_view = [c for c in ['nip','nama','jabatan','departemen','gaji_per_hari'] if c in gph_edit_view.columns]
+            gph_edit_view[cols_view].to_excel(writer, sheet_name='Gaji_Per_Hari_View_Filter', index=False)
         buf_gph.seek(0)
-        st.download_button("⬇️ Download GPH (Global & View Filter)", data=buf_gph,
-                        file_name=f"gaji_per_hari_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True)
+        st.download_button(
+            "⬇️ Download GPH (Global & View Filter)",
+            data=buf_gph,
+            file_name=f"gaji_per_hari_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
 
     gph_map = {}
     if not st.session_state.gph_df.empty:
