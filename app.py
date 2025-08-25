@@ -823,110 +823,24 @@ def main():
                     st.session_state.izin_marks = edited_parsial[['row_key','nip','tandai_ijin','durasi_ijin']].merge(base_map, on='row_key', how='left')
                     st.session_state.must_compute = True
 
-with tab_gph:
-    st.markdown("### Editor Gaji Per Hari per Karyawan")
-    st.caption("View ini mengikuti filter di atas (periode + dept/jabatan/nama/kategori). Penyimpanan hanya untuk baris yang tampil/diubah pada filter saat ini.")
-
-    # --- Bangun master karyawan TERFILTER (sudah pakai _df yang terfilter di atas)
-    #     Pastikan kolom nip string agar merge/update konsisten.
-    master_view = _df[['nip','nama','jabatan','departemen']].drop_duplicates().copy()
-    master_view['nip'] = master_view['nip'].astype(str)
-
-    # --- Sinkronkan daftar karyawan baru ke session_state.gph_df (tetap global)
-    if 'gph_df' not in st.session_state or st.session_state.gph_df is None or st.session_state.gph_df.empty:
-        base = master_view.copy()
-        base['gaji_per_hari'] = int(default_gph)
-        st.session_state.gph_df = base
-    else:
-        # pastikan tipe dan tambahkan yang belum ada
-        st.session_state.gph_df['nip'] = st.session_state.gph_df['nip'].astype(str)
-        exist_nips = set(st.session_state.gph_df['nip'])
-        add_rows = master_view[~master_view['nip'].isin(exist_nips)].copy()
-        if not add_rows.empty:
-            add_rows['gaji_per_hari'] = int(default_gph)
-            st.session_state.gph_df = pd.concat([st.session_state.gph_df, add_rows], ignore_index=True)
-
-    # --- Buat VIEW yang mengikuti filter saat ini (hanya nip yang ada di master_view)
-    full_gph = st.session_state.gph_df.copy()
-    full_gph['nip'] = full_gph['nip'].astype(str)
-    view = full_gph.merge(master_view[['nip','nama','jabatan','departemen']], on='nip', how='inner')
-
-    # --- (Opsional) Sub-filter tambahan di tab ini
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        dept_ops = sorted(view['departemen'].dropna().unique().tolist())
-        sf_dept = st.multiselect("Filter Dept (di tab ini)", dept_ops)
-    with c2:
-        jab_ops = sorted(view['jabatan'].dropna().unique().tolist())
-        sf_jab = st.multiselect("Filter Jabatan (di tab ini)", jab_ops)
-    with c3:
-        nama_ops = sorted(view['nama'].dropna().unique().tolist())
-        sf_nama = st.multiselect("Filter Nama (di tab ini)", nama_ops)
-
-    if sf_dept:
-        view = view[view['departemen'].isin(sf_dept)]
-    if sf_jab:
-        view = view[view['jabatan'].isin(sf_jab)]
-    if sf_nama:
-        view = view[view['nama'].isin(sf_nama)]
-
-    # --- Urutkan rapi
-    view = view[['nip','nama','jabatan','departemen','gaji_per_hari']].sort_values(['departemen','jabatan','nama','nip'])
-
-    st.write(f"Baris tampil: **{len(view):,}** (mengikuti filter)")
-    gph_edit_view = st.data_editor(
-        view,
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "gaji_per_hari": st.column_config.NumberColumn("Gaji Per Hari (Rp)", min_value=0, step=1000)
-        },
-        hide_index=True,
-        key="gph_editor_view"
-    )
-
-    # --- Util update partial: hanya apply perubahan pada nip yang tampil
-    def _apply_update_to_state(edited_df: pd.DataFrame):
-        if edited_df is None or edited_df.empty:
-            return
-        edited_df = edited_df.copy()
-        edited_df['nip'] = edited_df['nip'].astype(str)
-
-        # siapkan map gph hasil edit untuk nip yang tampil
-        upd_map = edited_df.set_index('nip')['gaji_per_hari'].to_dict()
-
-        # update ke st.session_state.gph_df hanya untuk nip yang ada di view
-        base = st.session_state.gph_df.copy()
-        base['nip'] = base['nip'].astype(str)
-        mask = base['nip'].isin(upd_map.keys())
-        if mask.any():
-            base.loc[mask, 'gaji_per_hari'] = base.loc[mask, 'nip'].map(upd_map)
-        st.session_state.gph_df = base
-
-    c1b, c2b = st.columns(2)
-    with c1b:
-        if st.button("💾 Simpan GPH (tanpa hitung)", key="btn_save_gph_filtered"):
-            _apply_update_to_state(gph_edit_view)
-            st.success("Gaji per hari disimpan (subset sesuai filter).")
-    with c2b:
-        if st.button("✅ Simpan & Hitung Ulang Rekap", key="btn_apply_gph_filtered"):
-            _apply_update_to_state(gph_edit_view)
-            st.session_state.must_compute = True
-
-    st.divider()
-    # Download GPH (opsional), tetap global agar lengkap
-    buf_gph = io.BytesIO()
-    with pd.ExcelWriter(buf_gph, engine='openpyxl') as writer:
-        st.session_state.gph_df[['nip','nama','jabatan','departemen','gaji_per_hari']].sort_values(
-            ['departemen','jabatan','nama','nip']
-        ).to_excel(writer, sheet_name='Gaji_Per_Hari_Global', index=False)
-        gph_edit_view.to_excel(writer, sheet_name='Gaji_Per_Hari_View_Filter', index=False)
-    buf_gph.seek(0)
-    st.download_button("⬇️ Download GPH (Global & View Filter)", data=buf_gph,
-                       file_name=f"gaji_per_hari_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
-
+    with tab_gph:
+        st.markdown("### Editor Gaji Per Hari per Karyawan")
+        gph_edit = st.data_editor(
+            st.session_state.gph_df,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={"gaji_per_hari": st.column_config.NumberColumn("Gaji Per Hari (Rp)", min_value=0, step=1000)},
+            key="gph_editor"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 Simpan GPH (tanpa hitung)", key="btn_save_gph"):
+                st.session_state.gph_df = gph_edit
+                st.success("Gaji per hari disimpan.")
+        with c2:
+            if st.button("✅ Simpan & Hitung Ulang Rekap", key="btn_apply_gph"):
+                st.session_state.gph_df = gph_edit
+                st.session_state.must_compute = True
 
     gph_map = {}
     if not st.session_state.gph_df.empty:
@@ -1184,5 +1098,3 @@ with tab_gph:
 
 if __name__ == "__main__":
     main()
-
-
