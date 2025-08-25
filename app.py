@@ -889,13 +889,10 @@ def main():
         c1, c2, c3 = st.columns(3)
         with c1:
             _deps = sorted([x for x in view['departemen'].dropna().unique().tolist() if str(x).strip() != ""]) if 'departemen' in view.columns else []
-            sf_dept = st.multiselect("Filter Dept (di tab ini)", _deps)
         with c2:
             _jabs = sorted([x for x in view['jabatan'].dropna().unique().tolist() if str(x).strip() != ""]) if 'jabatan' in view.columns else []
-            sf_jab = st.multiselect("Filter Jabatan (di tab ini)", _jabs)
         with c3:
             _nms = sorted([x for x in view['nama'].dropna().unique().tolist() if str(x).strip() != ""]) if 'nama' in view.columns else []
-            sf_nama = st.multiselect("Filter Nama (di tab ini)", _nms)
 
         if sf_dept:
             view = view[view['departemen'].isin(sf_dept)]
@@ -1229,3 +1226,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
