@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,16 +19,9 @@ def convert_to_snake_case(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = new_columns
     return df
 
-# ---------- Robust parser untuk kolom tanggal (prioritaskan dd-mm-yyyy) ----------
 _ddmmyyyy_pat = re.compile(r'^\s*\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}\s*$')
 
 def _parse_one_tanggal(v):
-    """Parse 1 nilai tanggal:
-       - string 'dd-mm-yyyy' / 'dd/mm/yyyy' / 'dd.mm.yyyy' -> dayfirst
-       - excel serial number -> origin 1899-12-30
-       - datetime/date -> langsung
-       selain itu -> coba dayfirst, kalau gagal -> NaT
-    """
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return pd.NaT
     if isinstance(v, (pd.Timestamp, datetime, date)):
@@ -39,21 +33,19 @@ def _parse_one_tanggal(v):
         out = pd.to_datetime(s, errors='coerce', dayfirst=True)
         if out is not None:
             return out
-    # numeric serial (excel)
     if re.fullmatch(r'^\d+(\.\d+)?$', s):
         try:
             return pd.to_datetime(float(s), unit='D', origin='1899-12-30', errors='coerce')
         except Exception:
             pass
-    # fallback
     out = pd.to_datetime(s, errors='coerce', dayfirst=True)
     if pd.isna(out):
         out = pd.to_datetime(s, errors='coerce')
     return out
 
 def parse_tanggal_series(series_like) -> pd.Series:
-    # list comprehension cepat & ringan
-    return pd.Series([_parse_one_tanggal(v) for v in series_like], index=getattr(series_like, 'index', None))
+    return pd.Series([_parse_one_tanggal(v) for v in series_like],
+                     index=getattr(series_like, 'index', None))
 
 def _is_missing_scan(val) -> bool:
     if pd.isna(val): return True
@@ -111,15 +103,21 @@ def normalize_jadwal_value(val: str) -> str:
 # =======================
 @st.cache_data(show_spinner=False)
 def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Dipanggil oleh load_data(); di-cache agar parsing tidak berulang."""
     import io as _io
     bio = _io.BytesIO(file_bytes)
-    # baca dengan converters agar pandas tidak auto-parse tanggal
+
+    def _read_csv(_bio, header_try):
+        _bio.seek(0)
+        try:
+            return pd.read_csv(_bio, header=header_try, converters={'tanggal': lambda x: x}, encoding='utf-8-sig')
+        except Exception:
+            _bio.seek(0)
+            return pd.read_csv(_bio, header=header_try, converters={'tanggal': lambda x: x}, encoding='latin1')
+
     if filename.lower().endswith('.csv'):
-        df = pd.read_csv(bio, header=1, converters={'tanggal': lambda x: x})
-        if df.shape[1] <= 1:  # fallback header 0 bila struktur tidak cocok
-            bio.seek(0)
-            df = pd.read_csv(bio, header=0, converters={'tanggal': lambda x: x})
+        df = _read_csv(bio, header_try=1)
+        if df.shape[1] <= 1:
+            df = _read_csv(bio, header_try=0)
     else:
         df = pd.read_excel(bio, header=1, converters={'tanggal': lambda x: x})
         if df.shape[1] <= 1:
@@ -128,17 +126,22 @@ def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
     df = convert_to_snake_case(df)
 
-    # tanggal → parser robust (dayfirst)
     if 'tanggal' in df.columns:
         df['tanggal'] = parse_tanggal_series(df['tanggal'])
 
-    # normalisasi jadwal -> kategori
     if 'jadwal' in df.columns:
         df['jadwal_kategori'] = df['jadwal'].map(normalize_jadwal_value).fillna("")
     else:
         df['jadwal_kategori'] = ""
 
-    # alias kolom scan
+    # Jangan baca scan pada hari sakit (dengan/tanpa SKD)
+    if 'jadwal_kategori' in df.columns:
+        mask_sakit = df['jadwal_kategori'].astype(str).str.upper().isin(['SAKIT_SKD', 'SAKIT_TANPA_SKD'])
+        if mask_sakit.any():
+            df.loc[mask_sakit, ['scan_masuk', 'scan_pulang']] = np.nan
+            if 'terlambat_menit' in df.columns:
+                df.loc[mask_sakit, 'terlambat_menit'] = 0
+
     aliases_in  = ["scan_masuk","scan_in","masuk","in"]
     aliases_out = ["scan_pulang","scan_out","pulang","out"]
     def _first_col(cols):
@@ -152,7 +155,6 @@ def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if col_out and col_out != "scan_pulang": df["scan_pulang"] = df[col_out]
     elif "scan_pulang" not in df.columns: df["scan_pulang"] = np.nan
 
-    # flag libur dari jam_kerja/jadwal (regex=False → cepat)
     is_libur_flag = pd.Series(False, index=df.index)
     if 'jam_kerja' in df.columns:
         jk = df['jam_kerja'].astype(str).str.lower()
@@ -167,10 +169,8 @@ def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
         )
     df['is_libur'] = is_libur_flag.fillna(False)
 
-    # menit telat
     df['terlambat_menit'] = df['terlambat'].map(_safe_to_minutes).astype(int) if 'terlambat' in df.columns else 0
 
-    # departemen alias
     if 'departemen' not in df.columns:
         for alt in ['department','departement','dept','divisi','bagian','unit']:
             if alt in df.columns:
@@ -181,7 +181,6 @@ def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return df
 
 def load_data(uploaded_file) -> pd.DataFrame:
-    """Wrapper agar API tetap sama, tapi parsing di-cache berdasarkan bytes+nama file."""
     try:
         file_bytes = uploaded_file.getvalue()
         return _parse_uploaded_bytes(file_bytes, uploaded_file.name)
@@ -190,7 +189,7 @@ def load_data(uploaded_file) -> pd.DataFrame:
         return None
 
 # =======================
-# Business rules (tetap)
+# Business rules
 # =======================
 def is_cleaning_service(jabatan: str) -> bool:
     if pd.isna(jabatan): return False
@@ -201,7 +200,6 @@ def hitung_potongan_terlambat_perkejadian(minutes: int) -> int:
     elif minutes <= 5: return minutes * 1000
     elif minutes <= 10: return 10000
     elif minutes <= 15: return 15000
-    elif minutes <= 20: return 20000
     else: return 20000
 
 def hitung_potongan_absen_cleaning_service(tidak_hadir: int, izin_pribadi_full: int,
@@ -236,7 +234,6 @@ def process_payroll_data(
     if scanlog_df is None or scanlog_df.empty:
         return pd.DataFrame()
 
-    # Pastikan kolom minimal ada
     for col, default in [
         ("nip", ""), ("nama", ""), ("jabatan", ""), ("departemen", ""),
         ("jadwal_kategori", ""), ("is_libur", False),
@@ -246,11 +243,9 @@ def process_payroll_data(
         if col not in scanlog_df.columns:
             scanlog_df[col] = default
 
-    # Normalisasi tanggal (sekali saja)
     if not np.issubdtype(scanlog_df["tanggal"].dtype, np.datetime64):
         scanlog_df["tanggal"] = parse_tanggal_series(scanlog_df["tanggal"])
 
-    # Siapkan marks izin pribadi (parsial)
     izin_mark = pd.DataFrame(columns=['nip','tanggal','tandai_ijin','durasi_ijin'])
     if isinstance(izin_pribadi_marks, pd.DataFrame) and not izin_pribadi_marks.empty:
         izin_mark = izin_pribadi_marks.copy()
@@ -259,7 +254,6 @@ def process_payroll_data(
 
     results = []
 
-    # Group PER KARYAWAN
     group_keys = ['nip', 'nama', 'jabatan', 'departemen'] if 'departemen' in scanlog_df.columns else ['nip','nama','jabatan']
     for _, group in scanlog_df.sort_values('tanggal').groupby(group_keys, dropna=False):
         nip = str(group.iloc[0]['nip'])
@@ -268,7 +262,6 @@ def process_payroll_data(
         departemen = group.iloc[0]['departemen'] if 'departemen' in group.columns else ""
         is_cs = is_cleaning_service(jabatan)
 
-        # periode_tanggal -> dd-mm-yy
         if group["tanggal"].notna().any():
             tmin_ts = pd.to_datetime(group["tanggal"]).min()
             tmax_ts = pd.to_datetime(group["tanggal"]).max()
@@ -276,16 +269,13 @@ def process_payroll_data(
         else:
             periode_tanggal = ""
 
-        # Mask kerja (bukan libur / izin dinas)
-        kerja_base = (~group['is_libur']) & (~group['jadwal_kategori'].isin(["LIBUR", "IZIN_DINAS"]))
-        # Hadir: kerja_base & bukan absen penuh & ada minimal 1 scan
+        kerja_base = (~group['is_libur']) & (~group['jadwal_kategori'].isin(["LIBUR","IZIN_DINAS"]))
         not_full_absen = (~group['jadwal_kategori'].isin(["TIDAK_HADIR","SAKIT_TANPA_SKD","SAKIT_SKD","IZIN_PRIBADI"]))
         ada_scan = (~group['scan_masuk'].apply(_is_missing_scan)) | (~group['scan_pulang'].apply(_is_missing_scan))
         hadir_mask = kerja_base & not_full_absen & ada_scan
 
         jumlah_hari_hadir = int(hadir_mask.sum())
 
-        # ==== KUMPULKAN TANGGAL IZIN PRIBADI PARSIAL (untuk karyawan ini) ====
         izin_parsial_dates = set()
         if isinstance(izin_mark, pd.DataFrame) and not izin_mark.empty:
             mk_emp = izin_mark[(izin_mark['nip'].astype(str) == nip) & (izin_mark['tandai_ijin'] == True)]
@@ -293,47 +283,38 @@ def process_payroll_data(
                 valid_dates = set(pd.to_datetime(group['tanggal'].dropna()).dt.date.tolist())
                 for _, r in mk_emp.iterrows():
                     tgl = r['tanggal']
-                    if pd.isna(tgl): 
+                    if pd.isna(tgl):
                         continue
                     d = pd.to_datetime(tgl).date()
                     if d in valid_dates:
                         izin_parsial_dates.add(d)
 
-        # Mask hari yang merupakan izin parsial (untuk baris group ini)
         mask_izin_parsial_hari = group['tanggal'].apply(lambda x: (not pd.isna(x)) and (x.date() in izin_parsial_dates))
 
-        # Missing scan MASUK pada hari hadir -> kurangi sisa toleransi 1 per kejadian
         miss_in_on_hadir = int((hadir_mask & group['scan_masuk'].apply(_is_missing_scan)).sum())
 
-        # ====== DAFTAR TELAT (MENGECUALIKAN HARI IZIN PARSIAL) ======
-        # Hanya ambil telat dari hari hadir DAN bukan hari izin parsial
         late_series = group.loc[hadir_mask & (~mask_izin_parsial_hari), 'terlambat_menit'].astype(int).tolist()
         late_positive = [m for m in late_series if m > 0]
         total_telat_positif = len(late_positive)
 
-        # Sisa toleransi kejadian setelah penalti miss-in
         tol_awal = max(0, int(toleransi_telat_kejadian))
         tol_terpakai_missin = min(tol_awal, max(0, miss_in_on_hadir))
         tol_sisa = max(0, tol_awal - miss_in_on_hadir)
 
-        # Terapkan toleransi (kejadian) ke daftar telat >0
         if tol_sisa >= total_telat_positif:
-            charged_minutes = []  # semua telat tertutupi toleransi
+            charged_minutes = []
         else:
             charged_minutes = late_positive[tol_sisa:]
 
-        # Hitung potongan telat
         potongan_terlambat = sum(hitung_potongan_terlambat_perkejadian(m) for m in charged_minutes)
         telat_dipotong = len(charged_minutes)
 
-        # Rekap kategori absen penuh
         kat = group.get("jadwal_kategori", pd.Series([], dtype=str)).fillna("")
         tidak_hadir = int((kat == "TIDAK_HADIR").sum())
         sakit_tanpa_skd = int((kat == "SAKIT_TANPA_SKD").sum())
         sakit_skd = int((kat == "SAKIT_SKD").sum())
         izin_pribadi_full = int((kat == "IZIN_PRIBADI").sum())
 
-        # Potongan absen (berbasis gaji per hari)
         gph = float(gaji_per_hari_map.get(nip, 0) or 0.0)
         if is_cs:
             potongan_absen, _ = hitung_potongan_absen_cleaning_service(
@@ -344,7 +325,6 @@ def process_payroll_data(
                 tidak_hadir, izin_pribadi_full, sakit_tanpa_skd, gph
             )
 
-        # Potongan Izin Pribadi PARSIAL (dari marks)
         potongan_izin_parsial = 0; izin_parsial_cnt = 0
         if isinstance(izin_mark, pd.DataFrame) and not izin_mark.empty:
             mk = izin_mark[(izin_mark['nip'].astype(str) == nip) & (izin_mark['tandai_ijin'] == True)]
@@ -370,14 +350,11 @@ def process_payroll_data(
                     potongan_izin_parsial += pot
         potongan_izin_parsial = int(round(potongan_izin_parsial, 0))
 
-        # Gaji BRUTO berbasis hadir
         gaji_bruto = int(round(gph * jumlah_hari_hadir, 0))
 
-        # Total potongan & gaji akhir
         total_potongan = int(potongan_terlambat) + int(potongan_absen) + int(potongan_izin_parsial)
         gaji_akhir = int(gaji_bruto - total_potongan)
 
-        # Alasan ringkas (string building ringan)
         alasan_parts = []
         alasan_parts.append(f"Hari hadir: {jumlah_hari_hadir}")
         if miss_in_on_hadir > 0:
@@ -420,7 +397,18 @@ def process_payroll_data(
 # =======================
 # Fitur Karyawan Rajin
 # =======================
-def build_rajin_recap(scan_df: pd.DataFrame, toleransi_rajin_menit: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def build_rajin_recap(
+    scan_df: pd.DataFrame,
+    toleransi_rajin_menit: int = 0,
+    izin_marks_df: pd.DataFrame = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Menghasilkan:
+      - rekap_rajin: jumlah_hari_kerja, jumlah_bersih, status
+      - detail_tidak_rajin: daftar per karyawan berisi 'alasan_tidak_rajin' dan 'info_tambahan'
+    DITAMBAH: menempelkan anotasi [Izin parsial X] pada baris detail jika tanggal tsb punya izin parsial.
+    (Tidak mempengaruhi status 'bersih' — izin parsial hanya info.)
+    """
     if scan_df is None or scan_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -436,6 +424,19 @@ def build_rajin_recap(scan_df: pd.DataFrame, toleransi_rajin_menit: int = 0) -> 
     if not np.issubdtype(df["tanggal"].dtype, np.datetime64):
         df["tanggal"] = parse_tanggal_series(df["tanggal"])
 
+    # --- siapkan lookup izin parsial -> (durasi) per (nip, tanggal_date)
+    izin_lookup = {}
+    if isinstance(izin_marks_df, pd.DataFrame) and not izin_marks_df.empty:
+        tmp = izin_marks_df.copy()
+        if not np.issubdtype(tmp["tanggal"].dtype, np.datetime64):
+            tmp["tanggal"] = parse_tanggal_series(tmp["tanggal"])
+        tmp = tmp[(tmp['tandai_ijin'] == True) & (tmp['tanggal'].notna())]
+        if not tmp.empty:
+            tmp['tanggal_date'] = pd.to_datetime(tmp['tanggal']).dt.date
+            for _, r in tmp.iterrows():
+                k = (str(r['nip']), r['tanggal_date'])
+                izin_lookup[k] = str(r.get('durasi_ijin','')).strip() or "-"
+
     absen_cats = {"TIDAK_HADIR","IZIN_PRIBADI","SAKIT_TANPA_SKD","SAKIT_SKD"}
     kerja_mask = (~df['is_libur']) & (~df['jadwal_kategori'].isin(["LIBUR","IZIN_DINAS"]))
 
@@ -449,14 +450,27 @@ def build_rajin_recap(scan_df: pd.DataFrame, toleransi_rajin_menit: int = 0) -> 
     }
 
     def _row_reasons(row):
-        if not kerja_mask.loc[row.name]: return []
+        """Kembalikan daftar 'alasan' yang mempengaruhi status bersih."""
+        if not kerja_mask.loc[row.name]:
+            return []
         reasons = []
         kat = str(row.get('jadwal_kategori',"")).upper()
         tm = int(row.get('terlambat_menit',0) or 0)
-        if kat in absen_cats: reasons.append(nice_label.get(kat, kat.title().replace("_"," ")))
-        if tm > toleransi_rajin_menit: reasons.append(f"Telat {tm}m")
-        if _is_missing_scan(row.get('scan_masuk')): reasons.append("Tidak scan MASUK")
-        if _is_missing_scan(row.get('scan_pulang')): reasons.append("Tidak scan PULANG")
+
+        if kat in absen_cats:
+            reasons.append(nice_label.get(kat, kat.title().replace("_"," ")))
+
+        # Telat hanya dihitung jika bukan sakit
+        if kat not in ("SAKIT_SKD","SAKIT_TANPA_SKD") and tm > toleransi_rajin_menit:
+            reasons.append(f"Telat {tm}m")
+
+        # Abaikan cek scan pada hari sakit
+        if kat not in ("SAKIT_SKD","SAKIT_TANPA_SKD"):
+            if _is_missing_scan(row.get('scan_masuk')):
+                reasons.append("Tidak scan MASUK")
+            if _is_missing_scan(row.get('scan_pulang')):
+                reasons.append("Tidak scan PULANG")
+
         return reasons
 
     df['alasan_list'] = df.apply(_row_reasons, axis=1)
@@ -476,20 +490,32 @@ def build_rajin_recap(scan_df: pd.DataFrame, toleransi_rajin_menit: int = 0) -> 
         lines = []
         for _, row in g.iterrows():
             if kerja_mask.loc[row.name] and row['alasan_list']:
-                tgl = "-" if pd.isna(row['tanggal']) else pd.to_datetime(row['tanggal']).strftime("%d-%m-%y")
+                tgl_ts = row['tanggal']
+                tgl = "-" if pd.isna(tgl_ts) else pd.to_datetime(tgl_ts).strftime("%d-%m-%y")
                 alasan = ", ".join(row['alasan_list'])
-                lines.append(f"{tgl}: {alasan}")
-        detail_alasan = "\n".join(lines) if lines else ""
 
+                # ---- Tambah anotasi jika ada izin parsial pada tanggal tsb (TIDAK mempengaruhi 'bersih') ----
+                dur = ""
+                if not pd.isna(tgl_ts):
+                    key = (str(row.get('nip', "")), pd.to_datetime(tgl_ts).date())
+                    if key in izin_lookup:
+                        d = izin_lookup[key]
+                        dur = f" [Izin parsial {d}]"
+
+                lines.append(f"{tgl}: {alasan}{dur}")
+
+        # info tambahan (libur/dinas) tetap dipisah
         info_lines = []
         sub = g[g['jadwal_kategori'].isin(["IZIN_DINAS","LIBUR"])]
         if not sub.empty:
             for _, r in sub.sort_values('tanggal').iterrows():
                 tgl = "-" if pd.isna(r['tanggal']) else pd.to_datetime(r['tanggal']).strftime("%d-%m-%y")
                 info_lines.append(f"{tgl}: {r['jadwal_kategori']}")
-        info_tambahan = "\n".join(info_lines) if info_lines else ""
 
-        return pd.Series({"alasan_tidak_rajin": detail_alasan, "info_tambahan": info_tambahan})
+        return pd.Series({
+            "alasan_tidak_rajin": "\n".join(lines) if lines else "",
+            "info_tambahan": "\n".join(info_lines) if info_lines else ""
+        })
 
     detail = grp.apply(_agg_detail).reset_index()
     detail_tidak_rajin = detail.merge(
@@ -501,14 +527,49 @@ def build_rajin_recap(scan_df: pd.DataFrame, toleransi_rajin_menit: int = 0) -> 
     return rekap_rajin, detail_tidak_rajin
 
 # =======================
+# Overlay: Terapkan STATUS MARKS (Izin Full / Sakit)
+# =======================
+def apply_status_marks(base_df: pd.DataFrame, marks_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df is None or base_df.empty or marks_df is None or marks_df.empty:
+        return base_df
+
+    df = base_df.copy()
+    df['tanggal_str'] = pd.to_datetime(df['tanggal']).dt.strftime("%d-%m-%y")
+    df['row_key'] = df['nip'].astype(str) + '|' + df['tanggal_str']
+
+    mk = marks_df.copy()
+    if not np.issubdtype(mk['tanggal'].dtype, np.datetime64):
+        mk['tanggal'] = parse_tanggal_series(mk['tanggal'])
+    mk['tanggal_str'] = pd.to_datetime(mk['tanggal']).dt.strftime("%d-%m-%y")
+    mk['row_key'] = mk['nip'].astype(str) + '|' + mk['tanggal_str']
+    mk = mk[mk['status'].astype(str).str.len() > 0]
+
+    if mk.empty:
+        df.drop(columns=['tanggal_str','row_key'], errors='ignore', inplace=True)
+        return df
+
+    map_status = mk.set_index('row_key')['status']
+    mask = df['row_key'].isin(map_status.index)
+    if mask.any():
+        df.loc[mask, 'jadwal_kategori'] = df.loc[mask, 'row_key'].map(map_status)
+
+    mask_sakit = df['jadwal_kategori'].isin(['SAKIT_SKD', 'SAKIT_TANPA_SKD'])
+    if mask_sakit.any():
+        df.loc[mask_sakit, ['scan_masuk', 'scan_pulang']] = np.nan
+        df.loc[mask_sakit, 'terlambat_menit'] = 0
+
+    df.drop(columns=['tanggal_str','row_key'], errors='ignore', inplace=True)
+    return df
+
+# =======================
 # App
 # =======================
 def main():
     st.set_page_config(page_title="Aplikasi Rekap Gaji Karyawan (toleransi kejadian)", page_icon="💰", layout="wide")
     st.title("💰 Aplikasi Rekap Gaji Karyawan")
-    st.caption("Parsing tanggal dd-mm-yyyy dioptimalkan dan di-cache. UI & fitur tidak berubah.")
+    st.caption("Tanggal dd-mm-yyyy dioptimalkan & pemrosesan hanya saat tombol ditekan (anti loading terus).")
 
-    # Sidebar
+    # -------- Sidebar
     with st.sidebar:
         st.header("📁 Upload")
         uploaded_scanlog = st.file_uploader("Upload Scanlog", type=['xlsx','xls','csv'])
@@ -522,11 +583,14 @@ def main():
         st.subheader("💵 Gaji Per Hari")
         default_gph = st.number_input("Default Gaji Per Hari (Rp)", min_value=0, value=0, step=1000)
 
+        st.divider()
+        if st.button("✅ Hitung Ulang Rekap (Global)", use_container_width=True):
+            st.session_state.must_compute = True
+
     if uploaded_scanlog is None:
         st.info("Silakan upload file scanlog untuk mulai.")
         return
 
-    # Load data (cached)
     scanlog_df = load_data(uploaded_scanlog)
     if scanlog_df is None:
         return
@@ -587,8 +651,7 @@ def main():
             kat_opsi = ["", "LIBUR","IZIN_DINAS","TIDAK_HADIR","IZIN_PRIBADI","SAKIT_TANPA_SKD","SAKIT_SKD"]
             f_kategori = st.multiselect("Kategori Jadwal", kat_opsi)
 
-    # --- Terapkan filter ---
-    _df = scanlog_df  # tanpa .copy() besar; operasi filter menghasilkan view baru
+    _df = scanlog_df
     if 'tanggal' in _df.columns:
         mask_date = _df['tanggal'].dt.date.between(start_date, end_date)
         _df = _df[mask_date]
@@ -601,6 +664,7 @@ def main():
     if f_kategori:
         _df = _df[_df['jadwal_kategori'].isin(f_kategori)]
 
+    # ---------- Preview ----------
     with st.expander("🔍 Preview Data Scanlog (setelah filter)"):
         colA, colB, colC, colD = st.columns([1,1,2,1])
         with colA: st.metric("Records", f"{len(_df):,}")
@@ -617,7 +681,6 @@ def main():
             telat_pos = int((_df.get('terlambat_menit', 0) > 0).sum())
             st.metric("Hari telat (>0m)", f"{telat_pos:,}")
 
-        # Tanggal ditampilkan sebagai dd-mm-yy (display only)
         df_prev = _df.copy()
         if 'tanggal' in df_prev.columns:
             df_prev['tanggal'] = pd.to_datetime(df_prev['tanggal'], errors='coerce').dt.strftime("%d-%m-%y")
@@ -635,7 +698,7 @@ def main():
             add['gaji_per_hari'] = int(default_gph)
             st.session_state.gph_df = pd.concat([st.session_state.gph_df, add], ignore_index=True)
 
-    # ========== Izin Pribadi Editor (parsial) ==========
+    # ========== [SECTION ▶ IZIN PARSIAL] ==========
     kerja_base = (~_df['is_libur']) & (~_df['jadwal_kategori'].isin(["LIBUR","IZIN_DINAS"]))
     izin_editor_df = _df.loc[kerja_base, ['tanggal','nip','nama','jabatan','departemen','jadwal_kategori','scan_masuk','scan_pulang','terlambat_menit']].copy()
     if not izin_editor_df.empty:
@@ -657,19 +720,68 @@ def main():
             izin_editor_df.loc[inter, 'durasi_ijin'] = old.loc[inter, 'durasi_ijin'].astype(str)
         izin_editor_df = izin_editor_df.reset_index()
 
+    # ========== [SECTION ▶ STATUS MARKS] ==========
+    status_view_df = _df[['tanggal','nip','nama','jabatan','departemen','jadwal_kategori']].copy()
+    if not status_view_df.empty:
+        status_view_df['tanggal_str'] = pd.to_datetime(status_view_df['tanggal']).dt.strftime("%d-%m-%y")
+        status_view_df['tanggal_fmt'] = status_view_df['tanggal_str']
+        status_view_df['status'] = ""
+        status_view_df['row_key'] = status_view_df['nip'].astype(str) + '|' + status_view_df['tanggal_str']
+
+    if 'status_marks' not in st.session_state:
+        st.session_state.status_marks = pd.DataFrame(columns=['row_key','tanggal','nip','status'])
+
+    if not status_view_df.empty and not st.session_state.status_marks.empty:
+        old = st.session_state.status_marks.set_index('row_key')
+        status_view_df = status_view_df.set_index('row_key')
+        inter = status_view_df.index.intersection(old.index)
+        if len(inter) > 0:
+            status_view_df.loc[inter, 'status'] = old.loc[inter, 'status'].astype(str)
+        status_view_df = status_view_df.reset_index()
+
     # ========== Tabs ==========
-    tab_izin, tab_gph, tab_rekap, tab_output, tab_rajin = st.tabs(
-        ["📝 Izin Pribadi (Parsial)", "💵 Gaji Per Hari", "📊 Rekap & Statistik", "✅ Output Akhir", "⭐ Karyawan Rajin"]
+    tab_status, tab_izin, tab_gph, tab_rekap, tab_output, tab_rajin = st.tabs(
+        ["🩺 Status Izin/Sakit (Full)", "📝 Izin Parsial", "💵 Gaji Per Hari", "📊 Rekap & Statistik", "✅ Output Akhir", "⭐ Karyawan Rajin"]
     )
 
+    with tab_status:
+        st.markdown("### Tandai Status per Tanggal: **Izin (Full)**, **Sakit SKD**, **Sakit non-SKD**")
+        st.caption("Tanda ini **menimpa** kolom `jadwal_kategori`. Hari sakit otomatis mengabaikan scan & telat.")
+        if status_view_df.empty:
+            st.info("Tidak ada baris pada filter saat ini.")
+        else:
+            cols_show = ['row_key','tanggal_fmt','nip','nama','jabatan','departemen','jadwal_kategori','status']
+            edited_status = st.data_editor(
+                status_view_df[cols_show],
+                use_container_width=True,
+                column_config={
+                    "tanggal_fmt": st.column_config.TextColumn("Tanggal (dd-mm-yy)"),
+                    "status": st.column_config.SelectboxColumn("Tandai Status", options=["", "IZIN_PRIBADI", "SAKIT_SKD", "SAKIT_TANPA_SKD"]),
+                },
+                hide_index=True,
+                key="editor_status_marks"
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("💾 Simpan Tanda (tanpa hitung)", key="btn_save_status"):
+                    base_map = status_view_df[['row_key','tanggal']].drop_duplicates()
+                    st.session_state.status_marks = edited_status[['row_key','nip','status']].merge(base_map, on='row_key', how='left')
+                    st.success("Tanda disimpan. Tekan 'Hitung Ulang Rekap' jika ingin memproses.")
+            with c2:
+                if st.button("✅ Simpan & Hitung Ulang Rekap", key="btn_apply_status"):
+                    base_map = status_view_df[['row_key','tanggal']].drop_duplicates()
+                    st.session_state.status_marks = edited_status[['row_key','nip','status']].merge(base_map, on='row_key', how='left')
+                    st.session_state.must_compute = True
+
     with tab_izin:
-        st.markdown("### Tandai Izin Pribadi Parsial per Hari")
-        st.caption("Pilih baris hari kerja lalu centang **Tandai Izin**, dan pilih durasinya.")
+        st.markdown("### Tandai Izin **Parsial** per Hari")
+        st.caption("Centang **Tandai Izin**, pilih durasi (0–5 jam). Tidak mempengaruhi `jadwal_kategori`.")
         if izin_editor_df.empty:
             st.info("Tidak ada baris hari kerja pada filter saat ini.")
         else:
             shown_cols = ['row_key','tanggal_fmt','nip','nama','jabatan','departemen','scan_masuk','scan_pulang','terlambat_menit','tandai_ijin','durasi_ijin']
-            edited = st.data_editor(
+            edited_parsial = st.data_editor(
                 izin_editor_df[shown_cols],
                 use_container_width=True,
                 column_config={
@@ -680,9 +792,17 @@ def main():
                 hide_index=True,
                 key="editor_izin_parsial"
             )
-            if isinstance(edited, pd.DataFrame) and not edited.empty:
-                base_map = izin_editor_df[['row_key','tanggal']].drop_duplicates()
-                st.session_state.izin_marks = edited[['row_key','nip','tandai_ijin','durasi_ijin']].merge(base_map, on='row_key', how='left')
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("💾 Simpan Izin Parsial (tanpa hitung)", key="btn_save_parsial"):
+                    base_map = izin_editor_df[['row_key','tanggal']].drop_duplicates()
+                    st.session_state.izin_marks = edited_parsial[['row_key','nip','tandai_ijin','durasi_ijin']].merge(base_map, on='row_key', how='left')
+                    st.success("Izin parsial disimpan. Tekan 'Hitung Ulang Rekap' jika ingin memproses.")
+            with c2:
+                if st.button("✅ Simpan & Hitung Ulang Rekap", key="btn_apply_parsial"):
+                    base_map = izin_editor_df[['row_key','tanggal']].drop_duplicates()
+                    st.session_state.izin_marks = edited_parsial[['row_key','nip','tandai_ijin','durasi_ijin']].merge(base_map, on='row_key', how='left')
+                    st.session_state.must_compute = True
 
     with tab_gph:
         st.markdown("### Editor Gaji Per Hari per Karyawan")
@@ -693,23 +813,57 @@ def main():
             column_config={"gaji_per_hari": st.column_config.NumberColumn("Gaji Per Hari (Rp)", min_value=0, step=1000)},
             key="gph_editor"
         )
-        if isinstance(gph_edit, pd.DataFrame) and not gph_edit.empty:
-            st.session_state.gph_df = gph_edit
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 Simpan GPH (tanpa hitung)", key="btn_save_gph"):
+                st.session_state.gph_df = gph_edit
+                st.success("Gaji per hari disimpan.")
+        with c2:
+            if st.button("✅ Simpan & Hitung Ulang Rekap", key="btn_apply_gph"):
+                st.session_state.gph_df = gph_edit
+                st.session_state.must_compute = True
 
-    # Mapping nip -> gaji per hari
     gph_map = {}
     if not st.session_state.gph_df.empty:
         gph_map = {str(r['nip']): float(r['gaji_per_hari'] or 0) for _, r in st.session_state.gph_df.iterrows()}
 
-    # Processing
+    status_marks_df = st.session_state.status_marks.copy() if isinstance(st.session_state.status_marks, pd.DataFrame) and not st.session_state.status_marks.empty else pd.DataFrame()
     izin_marks_df = st.session_state.izin_marks.copy() if isinstance(st.session_state.izin_marks, pd.DataFrame) and not st.session_state.izin_marks.empty else pd.DataFrame()
-    rekap_df = process_payroll_data(
-        _df, gaji_per_hari_map=gph_map,
-        toleransi_telat_kejadian=int(toleransi_telat_kejadian),
-        izin_pribadi_marks=izin_marks_df
-    )
 
-    # ----- Tab Rekap -----
+    _df_effective = apply_status_marks(_df, status_marks_df)
+
+    filter_key = "|".join([
+        f"{start_date}~{end_date}",
+        ",".join(sorted([str(x) for x in (f_dept or [])])),
+        ",".join(sorted([str(x) for x in (f_jabatan or [])])),
+        ",".join(sorted([str(x) for x in (f_nama or [])])),
+        ",".join(sorted([str(x) for x in (f_kategori or [])])),
+        str(len(_df_effective))
+    ])
+    if st.session_state.get("last_filter_key") != filter_key:
+        st.session_state.last_filter_key = filter_key
+        st.session_state.must_compute = True
+
+    if 'rekap_df_cache' not in st.session_state or st.session_state.get('must_compute', False):
+        with st.status("Menghitung rekap & rajin...", state="running"):
+            rekap_df_calc = process_payroll_data(
+                _df_effective, gaji_per_hari_map=gph_map,
+                toleransi_telat_kejadian=int(toleransi_telat_kejadian),
+                izin_pribadi_marks=izin_marks_df
+            )
+            # >>> PERUBAHAN: kirim izin_marks_df ke build_rajin_recap agar muncul anotasi Izin Parsial
+            rekap_rajin_calc, detail_tidak_rajin_calc = build_rajin_recap(
+                _df_effective, toleransi_rajin_menit=toleransi_rajin_menit, izin_marks_df=izin_marks_df
+            )
+        st.session_state.rekap_df_cache = rekap_df_calc
+        st.session_state.rekap_rajin_cache = rekap_rajin_calc
+        st.session_state.detail_tidak_rajin_cache = detail_tidak_rajin_calc
+        st.session_state.must_compute = False
+
+    rekap_df = st.session_state.get('rekap_df_cache', pd.DataFrame())
+    rekap_rajin_cache = st.session_state.get('rekap_rajin_cache', pd.DataFrame())
+    detail_tidak_rajin_cache = st.session_state.get('detail_tidak_rajin_cache', pd.DataFrame())
+
     with tab_rekap:
         st.markdown("## 📊 Hasil Rekap (Periode Terfilter — 1 baris/karyawan)")
         if rekap_df is None or rekap_df.empty:
@@ -759,8 +913,6 @@ def main():
 
             st.divider()
             st.subheader("⬇️ Download")
-
-            # --- 1) Download REKAP per karyawan (apa adanya sesuai tabel di atas) ---
             rekap_buf = io.BytesIO()
             with pd.ExcelWriter(rekap_buf, engine='openpyxl') as writer:
                 _rd[display_columns].to_excel(writer, sheet_name='Rekap_Per_Karyawan', index=False)
@@ -773,10 +925,7 @@ def main():
                 use_container_width=True
             )
 
-            # --- 2) Download STATISTIK (global + per departemen + per jabatan + telat) ---
             stat_buf = io.BytesIO()
-
-            # Siapkan statistik global
             stat_global_rows = []
             stat_global_rows.append(["Total Karyawan", total_karyawan])
             stat_global_rows.append(["Total Potongan", total_potongan])
@@ -784,31 +933,25 @@ def main():
             stat_global_rows.append(["Total Gaji Akhir", total_akhir])
             df_stat_global = pd.DataFrame(stat_global_rows, columns=["Metric", "Value"])
 
-            # Kolom-kolom agregasi yang mungkin tersedia
             kolom_sum = [c for c in [
                 'hari_hadir','gaji_bruto',
                 'potongan_terlambat','potongan_absen','potongan_izin_pribadi_parsial',
                 'total_potongan','gaji_akhir'
             ] if c in _rd.columns]
 
-            # Statistik per Departemen
             if 'departemen' in _rd.columns and not _rd.empty:
-                agg_map_dept = {c: 'sum' for c in kolom_sum}
-                agg_map_dept['nip'] = pd.NamedAgg(column='nip', aggfunc='nunique') if hasattr(pd, 'NamedAgg') else 'nunique'
                 try:
                     df_per_dept = _rd.groupby('departemen', dropna=False).agg(
                         **({k: (k, 'sum') for k in kolom_sum}),
                         jumlah_karyawan=('nip', 'nunique')
                     ).reset_index()
                 except Exception:
-                    # fallback untuk pandas lama
-                    df_per_dept = _rd.groupby('departemen', dropna=False).agg(agg_map_dept).reset_index()
-                    df_per_dept = df_per_dept.rename(columns={'nip': 'jumlah_karyawan'})
-
+                    df_per_dept = _rd.groupby('departemen', dropna=False).agg(
+                        {**{k: 'sum' for k in kolom_sum}, 'nip': 'nunique'}
+                    ).reset_index().rename(columns={'nip':'jumlah_karyawan'})
             else:
                 df_per_dept = pd.DataFrame()
 
-            # Statistik per Jabatan
             if 'jabatan' in _rd.columns and not _rd.empty:
                 try:
                     df_per_jabatan = _rd.groupby('jabatan', dropna=False).agg(
@@ -822,10 +965,9 @@ def main():
             else:
                 df_per_jabatan = pd.DataFrame()
 
-            # Statistik telat per karyawan (opsional)
             telat_cols = [c for c in ['total_telat_kejadian','telat_dipotong'] if c in _rd.columns]
             if telat_cols:
-                df_telat = _rd[['nip','nama'] + [c for c in telat_cols if c in _rd.columns]].copy()
+                df_telat = _rd[['nip','nama'] + telat_cols].copy()
             else:
                 df_telat = pd.DataFrame()
 
@@ -847,7 +989,6 @@ def main():
                 use_container_width=True
             )
 
-    # ----- Tab Output -----
     with tab_output:
         st.markdown("## ✅ Output Akhir (Pendapatan per Karyawan — periode terfilter)")
         if rekap_df is None or rekap_df.empty:
@@ -869,7 +1010,6 @@ def main():
             with c2:
                 st.metric("Total Jumlah Pendapatan (Gaji Akhir)", f"Rp {int(ak['gaji_akhir'].sum()):,}")
 
-            # Download : Output Akhir
             out_buf = io.BytesIO()
             with pd.ExcelWriter(out_buf, engine='openpyxl') as writer:
                 ak[kolom_output].to_excel(writer, sheet_name='Output_Akhir', index=False)
@@ -879,11 +1019,12 @@ def main():
                                file_name=f"output_akhir_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # ----- Tab Karyawan Rajin -----
     with tab_rajin:
         st.markdown("## ⭐ Rekapan Karyawan Rajin (berdasarkan Scanlog aktif)")
         st.caption("Definisi rajin: semua HARI KERJA bersih (tidak telat > ambang menit, tidak absen/izin/sakit, dan scan masuk/pulang lengkap).")
-        rekap_rajin, detail_tidak_rajin = build_rajin_recap(_df, toleransi_rajin_menit=toleransi_rajin_menit)
+
+        rekap_rajin = rekap_rajin_cache
+        detail_tidak_rajin = detail_tidak_rajin_cache
 
         if rekap_rajin is None or rekap_rajin.empty:
             st.info("Belum ada data untuk dihitung.")
@@ -906,7 +1047,6 @@ def main():
             st.markdown("### 📋 Rekap Rajin")
             st.dataframe(_r[cols_rekap], use_container_width=True)
 
-            # Download Rekap Rajin
             buf_r = io.BytesIO()
             with pd.ExcelWriter(buf_r, engine='openpyxl') as writer:
                 _r[cols_rekap].to_excel(writer, sheet_name='Rekap_Rajin', index=False)
@@ -916,7 +1056,6 @@ def main():
                                file_name=f"rekap_karyawan_rajin_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            # Detail alasan TIDAK Rajin (global)
             st.markdown("### 🧾 Detail Alasan Karyawan Tidak Rajin")
             if detail_tidak_rajin is None or detail_tidak_rajin.empty:
                 st.success("Semua karyawan berstatus **Rajin** pada rentang & filter saat ini 🎉")
@@ -926,13 +1065,17 @@ def main():
                     cols_det.append('departemen')
                 cols_det += ['jumlah_hari_kerja','jumlah_bersih','status','alasan_tidak_rajin','info_tambahan']
                 cols_det = [c for c in cols_det if c in detail_tidak_rajin.columns]
+
+                st.dataframe(detail_tidak_rajin[cols_det], use_container_width=True)
+
                 buf_d = io.BytesIO()
                 with pd.ExcelWriter(buf_d, engine='openpyxl') as writer:
                     detail_tidak_rajin[cols_det].to_excel(writer, sheet_name='Detail_Tidak_Rajin', index=False)
                 buf_d.seek(0)
                 st.download_button("⬇️ Download Detail Tidak Rajin (Excel)",
-                                buf_d,
-                                file_name=f"detail_tidak_rajin_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                                   buf_d,
+                                   file_name=f"detail_tidak_rajin_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 if __name__ == "__main__":
     main()
