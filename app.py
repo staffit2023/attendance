@@ -192,8 +192,27 @@ def load_data(uploaded_file) -> pd.DataFrame:
 # Business rules
 # =======================
 def is_cleaning_service(jabatan: str) -> bool:
-    if pd.isna(jabatan): return False
-    return 'cleaning service' in str(jabatan).lower()
+    """
+    Deteksi Cleaning Service berbasis JABATAN saja.
+    Menangani variasi: 'Cleaning Service', 'Cleaning Services',
+    'cleaning-service', 'CS', 'petugas cleaning', dll.
+    """
+    if pd.isna(jabatan):
+        return False
+
+    s = str(jabatan).strip().lower()
+    # Normalisasi spasi & hilangkan tanda baca agar match lebih robust
+    s = re.sub(r'[^a-z0-9\s]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    patterns = [
+        r'\bcleaning\s*service(s)?\b',  # cleaning service / services
+        r'\bcleaning\s*staff\b',
+        r'\bpetugas\s*cleaning\b',
+        r'\bcs\b',                      # singkatan
+        r'\boffice\s*boy\b', r'\bob\b'  # opsional jika di tempat Anda dianggap bagian CS
+    ]
+    return any(re.search(p, s) for p in patterns)
 
 def hitung_potongan_terlambat_perkejadian(minutes: int) -> int:
     if minutes <= 0: return 0
@@ -1079,3 +1098,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
