@@ -4,7 +4,7 @@
 # - Kompatibilitas tipe kolom nip (Text vs Number) untuk editor
 # - Potongan ISTIRAHAT LEBIH dari kolom 'istirahat'
 #   * Jatah 60 menit/hari
-#   * Khusus Jumat: bebas (tidak dipotong walau >60)
+#   * Khusus Jumat: bebas (tidak dipotong walau >60) -> DETEKSI DARI TANGGAL (weekday==4)
 
 import streamlit as st
 import pandas as pd
@@ -60,23 +60,110 @@ def _is_missing_scan(val) -> bool:
     return s in {"", "-", "0", "00:00", "00:00:00"}
 
 def _safe_to_minutes(x) -> int:
-    """Baca 'HH:MM' atau angka menit → int menit. Nilai invalid -> 0."""
-    if pd.isna(x) or x == '': return 0
-    s = str(x).strip()
-    try:
-        if ':' in s:
-            hh, mm, *_ = (s.split(':') + ['0','0'])[:2]
-            return int(float(hh))*60 + int(float(mm))
-        return int(float(s))
-    except Exception:
+    """
+    Parser menit yang lebih fleksibel.
+    Menerima:
+      - "HH:MM" atau "HH:MM:SS"
+      - "1 jam 30", "1j 30m", "1 jam 30 menit"
+      - "1.5 jam" / "1,5 jam" (jam desimal)
+      - "90" (dianggap menit)
+      - "01.30" (ditafsir sebagai HH.MM → jam:menit)
+      - "90m" (menit eksplisit)
+    Nilai invalid -> 0.
+    """
+    if pd.isna(x) or x == '':
         return 0
 
-# ---------- Deteksi 'Jumat' dari kolom jam_kerja ----------
-_FRIDAY_PAT = re.compile(r'\bjum(a|aa)?t?\b|fri(day)?', flags=re.IGNORECASE)
-def is_jumat_from_jamkerja(val) -> bool:
-    if pd.isna(val): return False
-    s = str(val).strip()
-    return bool(_FRIDAY_PAT.search(s))
+    s0 = str(x).strip().lower()
+    if s0 == '-':
+        return 0
+
+    # Normalisasi koma → titik
+    s = s0.replace(',', '.')
+    # Hilangkan label umum agar mudah di-parse
+    s_clean = (s
+               .replace('menit', 'm')
+               .replace('mnt', 'm')
+               .replace('min', 'm')
+               .replace('jam', 'h')
+               .replace(' j', ' h')
+               .replace('j ', 'h ')
+               .replace('hour', 'h'))
+
+    # 1) Format HH:MM[:SS]
+    if ':' in s_clean:
+        try:
+            parts = s_clean.split(':')
+            hh = float(parts[0]) if len(parts) > 0 and parts[0] != '' else 0
+            mm = float(parts[1]) if len(parts) > 1 and parts[1] != '' else 0
+            # detik diabaikan
+            return int(hh * 60 + mm)
+        except Exception:
+            pass
+
+    # 2) Format HH.MM (contoh "01.30" → 1 jam 30 menit) jika bagian setelah titik adalah menit valid <60
+    if re.fullmatch(r'^\d+(\.\d+)?$', s_clean) and '.' in s_clean:
+        try:
+            hh_str, mm_str = s_clean.split('.', 1)
+            if mm_str.isdigit():
+                hh = int(hh_str)
+                mm = int(mm_str)
+                if 0 <= mm < 60:
+                    return hh * 60 + mm
+        except Exception:
+            pass
+
+    # 3) Ekspresi "Xh Ym" (mis. "1h 30m" / "1 h 30 m")
+    m_hm = re.search(r'(?P<h>\d+(\.\d+)?)\s*h(?:\s*(?P<m>\d+)\s*m)?', s_clean)
+    if m_hm:
+        try:
+            hh = float(m_hm.group('h'))
+            mm = float(m_hm.group('m') or 0)
+            return int(hh * 60 + mm)
+        except Exception:
+            pass
+
+    # 4) Hanya jam desimal "Xh" / "X jam"
+    m_h = re.search(r'(?P<h>\d+(\.\d+)?)\s*h\b', s_clean)
+    if m_h:
+        try:
+            hh = float(m_h.group('h'))
+            return int(round(hh * 60))
+        except Exception:
+            pass
+
+    # 5) Hanya menit "Xm"
+    m_m = re.search(r'(?P<m>\d+)\s*m\b', s_clean)
+    if m_m:
+        try:
+            return int(m_m.group('m'))
+        except Exception:
+            pass
+
+    # 6) Hanya angka → anggap menit (bukan jam desimal)
+    if re.fullmatch(r'^\d+(\.\d+)?$', s_clean):
+        try:
+            return int(round(float(s_clean)))
+        except Exception:
+            pass
+
+    return 0
+
+# ---------- Deteksi 'Jumat' dari TANGGAL (weekday) ----------
+def is_jumat_from_tanggal(ts) -> bool:
+    """
+    True jika 'ts' jatuh pada hari Jumat (weekday==4).
+    Tidak tergantung pada teks jam_kerja.
+    """
+    try:
+        if pd.isna(ts):
+            return False
+        t = pd.to_datetime(ts, errors='coerce')
+        if pd.isna(t):
+            return False
+        return t.weekday() == 4  # Senin=0 ... Jumat=4
+    except Exception:
+        return False
 
 # ---------- Pin/freeze kolom adaptif ----------
 def with_pinned(base_config, df_like) -> dict:
@@ -386,26 +473,30 @@ def process_payroll_data(
             )
 
         # ------- ISTIRAHAT LEBIH dari kolom 'istirahat' -------
-        # Jatah 60 menit/hari; Jumat bebas.
+        # Jatah 60 menit/hari; Jumat bebas (deteksi dari 'tanggal', bukan teks).
         potongan_istirahat = 0.0
         istirahat_kejadian = 0
         istirahat_total_menit_excess = 0
 
         has_ist = 'istirahat' in group.columns
-        has_jk = 'jam_kerja' in group.columns
+        has_tgl = 'tanggal' in group.columns
 
-        if has_ist and jumlah_hari_hadir > 0:
-            for idx, row in group.loc[hadir_mask].iterrows():
+        if has_ist:
+            # Hitung pada hari kerja aktif (bukan libur / izin dinas / sakit / izin full),
+            # meskipun tidak ada scan masuk/pulang.
+            istirahat_mask = (
+                (~group['is_libur']) &
+                (~group['jadwal_kategori'].isin(["LIBUR", "IZIN_DINAS", "SAKIT_TANPA_SKD", "SAKIT_SKD", "IZIN_PRIBADI"]))
+            )
+
+            for idx, row in group.loc[istirahat_mask].iterrows():
                 menit_total = _safe_to_minutes(row.get('istirahat', 0))
                 if menit_total <= 0:
                     continue
 
-                # Jumat = bebas (excess = 0)
-                if has_jk and is_jumat_from_jamkerja(row.get('jam_kerja', '')):
-                    menit_excess = 0
-                else:
-                    # Hari biasa: jatah 60 menit
-                    menit_excess = max(0, menit_total - 60)
+                # Jumat = bebas (excess = 0) berdasarkan tanggal real
+                jumat_bebas = has_tgl and is_jumat_from_tanggal(row.get('tanggal', pd.NaT))
+                menit_excess = 0 if jumat_bebas else max(0, menit_total - 60)
 
                 if menit_excess <= 0:
                     continue
