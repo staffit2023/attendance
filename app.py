@@ -270,7 +270,7 @@ def is_cleaning_service(jabatan: str) -> bool:
         r'\bcs\b',
         r'\boffice\s*boy\b', r'\bob\b'
     ]
-    return any(re.search(p, s) for p in patterns))
+    return any(re.search(p, s) for p in patterns)
 
 def hitung_potongan_terlambat_perkejadian(minutes: int) -> int:
     if minutes <= 0: return 0
@@ -1300,3 +1300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
