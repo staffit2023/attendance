@@ -71,9 +71,27 @@ def _safe_to_minutes(x) -> int:
     except Exception:
         return 0
 
-# ---------- Deteksi 'Jumat' dari kolom jam_kerja ----------
+# ---------- Deteksi 'Jumat' dari KALENDER (tanggal) ----------
+# (Menggantikan logika lama yang membaca dari teks kolom jam_kerja)
+def is_jumat_from_tanggal(ts) -> bool:
+    """
+    True bila ts jatuh pada hari Jumat (weekday==4).
+    ts bisa Timestamp/str/NaT; NaT atau gagal parse -> False.
+    """
+    if pd.isna(ts):
+        return False
+    try:
+        dt = pd.to_datetime(ts, errors='coerce')
+        if pd.isna(dt):
+            return False
+        return dt.weekday() == 4  # Monday=0 ... Friday=4
+    except Exception:
+        return False
+
+# ---------- (Sisa util lama dibiarkan, tapi tidak lagi dipakai untuk Jumat) ----------
 _FRIDAY_PAT = re.compile(r'\bjum(a|aa)?t?\b|fri(day)?', flags=re.IGNORECASE)
 def is_jumat_from_jamkerja(val) -> bool:
+    # Dipertahankan agar kompatibel, namun tidak lagi digunakan untuk logika bisnis.
     if pd.isna(val): return False
     s = str(val).strip()
     return bool(_FRIDAY_PAT.search(s))
@@ -200,7 +218,7 @@ def _parse_uploaded_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if col_out and col_out != "scan_pulang": df["scan_pulang"] = df[col_out]
     elif "scan_pulang" not in df.columns: df["scan_pulang"] = np.nan
 
-    # Flag libur & izin dinas
+    # Flag libur & izin dinas (tetap dari teks; tidak diubah)
     is_libur_flag = pd.Series(False, index=df.index)
     if 'jam_kerja' in df.columns:
         jk = df['jam_kerja'].astype(str).str.lower()
@@ -252,7 +270,7 @@ def is_cleaning_service(jabatan: str) -> bool:
         r'\bcs\b',
         r'\boffice\s*boy\b', r'\bob\b'
     ]
-    return any(re.search(p, s) for p in patterns)
+    return any(re.search(p, s) for p in patterns))
 
 def hitung_potongan_terlambat_perkejadian(minutes: int) -> int:
     if minutes <= 0: return 0
@@ -386,13 +404,12 @@ def process_payroll_data(
             )
 
         # ------- ISTIRAHAT LEBIH dari kolom 'istirahat' -------
-        # Jatah 60 menit/hari; Jumat bebas.
+        # Jatah 60 menit/hari; Jumat bebas (SESUAI KALENDER).
         potongan_istirahat = 0.0
         istirahat_kejadian = 0
         istirahat_total_menit_excess = 0
 
         has_ist = 'istirahat' in group.columns
-        has_jk = 'jam_kerja' in group.columns
 
         if has_ist and jumlah_hari_hadir > 0:
             for idx, row in group.loc[hadir_mask].iterrows():
@@ -400,12 +417,13 @@ def process_payroll_data(
                 if menit_total <= 0:
                     continue
 
-                # Jumat = bebas (excess = 0)
-                if has_jk and is_jumat_from_jamkerja(row.get('jam_kerja', '')):
+                # >>>>> PERUBAHAN INTI: Jumat dilihat dari TANGGAL, bukan jam_kerja
+                if is_jumat_from_tanggal(row.get('tanggal')):
                     menit_excess = 0
                 else:
                     # Hari biasa: jatah 60 menit
                     menit_excess = max(0, menit_total - 60)
+                # <<<<< AKHIR PERUBAHAN
 
                 if menit_excess <= 0:
                     continue
@@ -1187,7 +1205,6 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
-
 
     # ----- Tab OUTPUT AKHIR -----
     with tab_output:
